@@ -39,11 +39,12 @@
 %% Supported configuration variables:
 %%
 %% * port_specs - Erlang list of tuples of the forms
-%%                {arch_regex(), "priv/foo.so", ["c_src/foo.c"]}
-%%                {"priv/foo", ["c_src/foo.c"]}
+%%                {ArchRegex, TargetFile, Sources, Options}
+%%                {ArchRegex, TargetFile, Sources}
+%%                {TargetFile, Sources}
 %%
-%% * port_envs - Erlang list of key/value pairs which will control
-%%               the environment when running the compiler and linker.
+%% * port_env   - Erlang list of key/value pairs which will control
+%%                the environment when running the compiler and linker.
 %%
 %%               By default, the following variables are defined:
 %%               CC       - C compiler
@@ -73,7 +74,7 @@
 %%               you MUST include a shell-style reference in your definition.
 %%               e.g. to extend CFLAGS, do something like:
 %%
-%%               {port_envs, [{"CFLAGS", "$CFLAGS -MyOtherOptions"}]}
+%%               {port_env, [{"CFLAGS", "$CFLAGS -MyOtherOptions"}]}
 %%
 %%               It is also possible to specify platform specific options
 %%               by specifying a triplet where the first string is a regex
@@ -81,7 +82,7 @@
 %%               e.g. to specify a CFLAG that only applies to x86_64 on linux
 %%               do:
 %%
-%%               {port_envs, [{"x86_64.*-linux", "CFLAGS",
+%%               {port_env, [{"x86_64.*-linux", "CFLAGS",
 %%                             "$CFLAGS -X86Options"}]}
 %%
 
@@ -96,7 +97,7 @@ compile(Config, AppFile) ->
         [] ->
             ok;
         _ ->
-            Env = setup_env(Config),
+            Env = rebar_config:get_env(Config, ?MODULE),
 
             %% Compile each of the sources
             {NewBins, ExistingBins} = compile_each(SourceFiles, Config, Env,
@@ -106,9 +107,7 @@ compile(Config, AppFile) ->
             %% target directory exists
             Specs = port_specs(Config, AppFile, NewBins ++ ExistingBins),
             ?INFO("Using specs ~p\n", [Specs]),
-            lists:foreach(fun({_, Target,_}) ->
-                                  ok = filelib:ensure_dir(Target);
-                             ({Target, _}) ->
+            lists:foreach(fun({Target, _}) ->
                                   ok = filelib:ensure_dir(Target)
                           end, Specs),
 
@@ -139,28 +138,32 @@ clean(Config, AppFile) ->
     rebar_file_utils:delete_each([source_to_bin(S) || S <- Sources]),
 
     %% Delete the target file
-    ExtractTarget = fun({_, Target, _}) ->
+    ExtractTarget = fun({_, Target, _, _}) ->
+                            Target;
+                       ({_, Target, _}) ->
                             Target;
                        ({Target, _}) ->
                             Target
                     end,
-    rebar_file_utils:delete_each([ExtractTarget(S)
-                                  || S <- port_specs(Config, AppFile,
-                                                     expand_objects(Sources))]).
+    PortSpecs = port_specs(Config, AppFile, expand_objects(Sources)),
+    rebar_file_utils:delete_each([ExtractTarget(S) || S <- PortSpecs]).
 
 setup_env(Config) ->
-    %% Extract environment values from the config (if specified) and
-    %% merge with the default for this operating system. This enables
-    %% max flexibility for users.
-    DefaultEnvs  = filter_envs(default_env(), []),
-    PortEnvs = port_envs(Config),
-    OverrideEnvs = global_defines() ++ filter_envs(PortEnvs, []),
-    RawEnv = apply_defaults(os_env(), DefaultEnvs) ++ OverrideEnvs,
-    expand_vars_loop(merge_each_var(RawEnv, [])).
+    setup_env(Config, []).
 
 %% ===================================================================
 %% Internal functions
 %% ===================================================================
+
+setup_env(Config, ExtraEnv) ->
+    %% Extract environment values from the config (if specified) and
+    %% merge with the default for this operating system. This enables
+    %% max flexibility for users.
+    DefaultEnv  = filter_envs(default_env(), []),
+    PortEnv = port_env(Config),
+    OverrideEnv = global_defines() ++ ExtraEnv ++ filter_envs(PortEnv, []),
+    RawEnv = apply_defaults(os_env(), DefaultEnv) ++ OverrideEnv,
+    expand_vars_loop(merge_each_var(RawEnv, [])).
 
 global_defines() ->
     Defines = rebar_config:get_global(defines, []),
@@ -174,22 +177,34 @@ get_sources(Config) ->
             expand_sources(rebar_config:get_list(Config, port_sources,
                                                  ["c_src/*.c"]), []);
         PortSpecs ->
-            expand_port_specs(PortSpecs)
+            expand_port_specs(Config, PortSpecs)
     end.
 
-expand_port_specs(Specs) ->
-    lists:flatmap(fun({_, Target, FileSpecs}) ->
-                          expand_file_specs(Target, FileSpecs);
+expand_port_specs(Config, Specs) ->
+    lists:flatmap(fun({_, Target, FileSpecs, Opts}) ->
+                          expand_file_specs(Target, FileSpecs,
+                                            expand_opts(Config, Opts));
+                     ({_, Target, FileSpecs}) ->
+                          expand_file_specs(Target, FileSpecs, []);
                      ({Target, FileSpecs}) ->
-                          expand_file_specs(Target, FileSpecs)
+                          expand_file_specs(Target, FileSpecs, [])
                   end, filter_port_specs(Specs)).
 
-expand_file_specs(Target, FileSpecs) ->
+expand_opts(Config, Opts) ->
+    lists:map(fun({envs, Env}) ->
+                      {envs, setup_env(Config, filter_envs(Env, []))};
+                 (Opt) ->
+                      Opt
+              end, Opts).
+
+expand_file_specs(Target, FileSpecs, Opts) ->
     Sources = lists:flatmap(fun filelib:wildcard/1, FileSpecs),
-    [{Target, Src} || Src <- Sources].
+    [{Target, Src, Opts} || Src <- Sources].
 
 filter_port_specs(Specs) ->
-    lists:filter(fun({ArchRegex, _, _}) ->
+    lists:filter(fun({ArchRegex, _, _, _}) ->
+                         rebar_utils:is_arch(ArchRegex);
+                    ({ArchRegex, _, _}) ->
                          rebar_utils:is_arch(ArchRegex);
                     ({_, _}) ->
                          true
@@ -214,6 +229,8 @@ expand_sources([Spec | Rest], Acc) ->
 expand_objects(Sources) ->
     [expand_object(".o", Src) || Src <- Sources].
 
+expand_object(Ext, {_Target, Source, _Opts}) ->
+    expand_object(Ext, Source);
 expand_object(Ext, {_Target, Source}) ->
     expand_object(Ext, Source);
 expand_object(Ext, Source) ->
@@ -221,9 +238,10 @@ expand_object(Ext, Source) ->
 
 compile_each([], _Config, _Env, NewBins, ExistingBins) ->
     {lists:reverse(NewBins), lists:reverse(ExistingBins)};
-compile_each([RawSource | Rest], Config, Env, NewBins, ExistingBins) ->
+compile_each([RawSource | Rest], Config, RawEnv, NewBins, ExistingBins) ->
     %% TODO: DEPRECATED: remove
-    {Type, Source} = source_type(RawSource),
+    {Type, Source, Opts} = source_type(RawSource),
+    Env = proplists:get_value(envs, Opts, RawEnv),
     Ext = filename:extension(Source),
     Bin = filename:rootname(Source, Ext) ++ ".o",
     case needs_compile(Source, Bin) of
@@ -238,8 +256,8 @@ compile_each([RawSource | Rest], Config, Env, NewBins, ExistingBins) ->
             compile_each(Rest, Config, Env, NewBins, [Bin | ExistingBins])
     end.
 
-source_type({Target, Source}) -> {target_type(Target), Source};
-source_type(Source)           -> {drv, Source}.
+source_type({Target, Source, Opts}) -> {target_type(Target), Source, Opts};
+source_type(Source)                 -> {drv, Source, []}.
 
 needs_compile(Source, Bin) ->
     %% TODO: Generate depends using gcc -MM so we can also
@@ -381,9 +399,11 @@ is_expandable(InStr) ->
         nomatch -> false
     end.
 
-port_envs(Config) ->
-    PortEnvs = rebar_config:get_list(Config, port_envs, []),
-    %% TODO: remove migration of deprecated port_envs (DRV_-/EXE_-less vars)
+port_env(Config) ->
+    %% TODO: remove support for deprecated port_envs option
+    PortEnv = rebar_utils:get_deprecated_list(Config, port_envs, port_env,
+                                              [], "soon"),
+    %% TODO: remove migration of deprecated port_env (DRV_-/EXE_-less vars)
     %%       when the deprecation grace period ends
     WarnAndConvertVar = fun(Var) ->
                                 New = "DRV_" ++ Var,
@@ -406,7 +426,7 @@ port_envs(Config) ->
                  ({Var, Val}) ->
                       {ConvertVar(Var), ReplaceVars(Val)}
               end,
-    [Convert(Env) || Env <- PortEnvs].
+    [Convert(Env) || Env <- PortEnv].
 
 %%
 %% Filter a list of env vars such that only those which match the provided
@@ -519,6 +539,8 @@ default_env() ->
      {"darwin11.*-32", "LDFLAGS", "-arch i386 $LDFLAGS"}
     ].
 
+source_to_bin({_Target, Source, _Opts}) ->
+    source_to_bin(Source);
 source_to_bin({_Target, Source}) ->
     source_to_bin(Source);
 source_to_bin(Source) ->
