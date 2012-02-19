@@ -168,11 +168,11 @@ global_defines() ->
     [{"ERL_CFLAGS", "$ERL_CFLAGS " ++ Flags}].
 
 get_sources(Config) ->
-    case rebar_config:get_list(Config, port_specs, []) of
+    case rebar_config:get_local(Config, port_specs, []) of
         [] ->
             %% TODO: DEPRECATED: remove
-            expand_sources(rebar_config:get_list(Config, port_sources,
-                                                 ["c_src/*.c"]), []);
+            expand_sources(rebar_config:get_local(Config, port_sources,
+                                                  ["c_src/*.c"]), []);
         PortSpecs ->
             expand_port_specs(PortSpecs)
     end.
@@ -382,7 +382,7 @@ is_expandable(InStr) ->
     end.
 
 port_envs(Config) ->
-    PortEnvs = rebar_config:get_list(Config, port_envs, []),
+    PortEnvs = rebar_config:get_local(Config, port_envs, []),
     %% TODO: remove migration of deprecated port_envs (DRV_-/EXE_-less vars)
     %%       when the deprecation grace period ends
     WarnAndConvertVar = fun(Var) ->
@@ -546,7 +546,7 @@ switch_to_dll_or_exe(Orig = {Name, Spec}) ->
     end.
 
 make_port_specs(Config, AppFile, Bins) ->
-    case rebar_config:get(Config, port_specs, undefined) of
+    case rebar_config:get_local(Config, port_specs, undefined) of
         undefined ->
             %% TODO: DEPRECATED: remove
             make_so_specs(Config, AppFile, Bins);
@@ -574,12 +574,12 @@ sources_to_bins(RawSources) ->
 
 %% DEPRECATED
 make_so_specs(Config, AppFile, Bins) ->
-    case rebar_config:get(Config, so_specs, undefined) of
+    case rebar_config:get_local(Config, so_specs, undefined) of
         undefined ->
             %% New form of so_specs is not provided. See if the old form
             %% of {so_name} is available instead
             Dir = "priv",
-            SoName = case rebar_config:get(Config, so_name, undefined) of
+            SoName = case rebar_config:get_local(Config, so_name, undefined) of
                          undefined ->
                              %% Ok, neither old nor new form is available. Use
                              %% the app name and generate a sensible default.
