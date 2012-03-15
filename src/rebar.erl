@@ -97,7 +97,7 @@ run_aux(Commands) ->
     rebar_log:init(),
 
     %% Initialize vsn cache
-    _VsnCacheTab = ets:new(rebar_vsn_cache,[named_table, public]),
+    _VsnCacheTab = ets:new(rebar_vsn_cache,[named_table, private]),
 
     %% Convert command strings to atoms
     CommandAtoms = [list_to_atom(C) || C <- Commands],
